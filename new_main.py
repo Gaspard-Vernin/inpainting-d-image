@@ -3,19 +3,53 @@ import itertools
 import math
 import numpy as np
 from scipy.signal import correlate
-
+import matplotlib.pyplot as plt
 img = skio.imread("../image2.png").astype(float)
 if img.ndim == 2:            
     img = img[:, :, None]
 shape = img.shape
 height, width, nb_canaux = shape
+def draw_mask(I, brush=4):
+    H, W = I.shape[:2]
+    omega = np.zeros((H, W), dtype=bool)
+    yy, xx = np.ogrid[:H, :W]         
+    state = {"drawing": False, "erase": False}
+
+    fig, ax = plt.subplots()
+    ax.imshow(I, interpolation="none")
+    overlay = ax.imshow(np.where(omega, 1.0, np.nan), alpha=0.5, cmap="Reds", vmin=0, vmax=1)
+
+    def paint(event):
+        if event.inaxes != ax or not state["drawing"]:
+            return
+        x, y = int(event.xdata), int(event.ydata)
+        disk = (xx - x) ** 2 + (yy - y) ** 2 <= brush ** 2
+        omega[disk] = not state["erase"]
+        overlay.set_data(np.where(omega, 1.0, np.nan))
+        fig.canvas.draw_idle()
+        return(x,y)
+
+    def on_press(event):
+        state["drawing"] = True
+        state["erase"] = (event.button == 3)   # 1 = gauche, 3 = droit
+        paint(event)
+
+    def on_release(event):
+        state["drawing"] = False
+
+    fig.canvas.mpl_connect("button_press_event", on_press)
+    fig.canvas.mpl_connect("button_release_event", on_release)
+    fig.canvas.mpl_connect("motion_notify_event", paint)
+
+    plt.show()      
+    return omega
 
 #pour l'instant on dit qu'on veut dupprimer le masque suivant : 
 taille_carre = 30
 i0 = height // 2 - taille_carre // 2 
 j0 = width // 2 - taille_carre // 2
-forme = list(itertools.product(range(i0, i0 + taille_carre), range(j0, j0 + taille_carre)))
-forme_origine = set(forme) #a check pk mettre un set ici ?
+forme = draw_mask(img)
+forme_origine = set(forme) 
 forme_set = set(forme)
 
 taille_patch = 5
