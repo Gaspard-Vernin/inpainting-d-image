@@ -82,7 +82,6 @@ def remplacer_pixel(im,omega,i,j):
     omega[i,j]=1
 
 
-# image avec le trou en blanc, AVANT que la boucle modifie omega
 im_trou=im.copy()
 im_trou[omega==0]=255
 
