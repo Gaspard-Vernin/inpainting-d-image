@@ -55,9 +55,9 @@ def get_mask_interactively(image_path, brush_size=15):
 
 
 
-chemin="../im.png"
+chemin="onio (1).jpg"
 
-forme = get_mask_interactively(chemin, brush_size=26)
+forme = get_mask_interactively(chemin, brush_size=40)
 
 
 img = skio.imread(chemin).astype(float)
@@ -71,7 +71,7 @@ height, width, nb_canaux = shape
 forme_origine = set(forme) 
 forme_set = set(forme)
 print(forme_origine)
-taille_patch = 17
+taille_patch = 13
 h = (taille_patch - 1) // 2
 alpha = 255
 mouvements_simples = [(1,0),(0,1),(-1,0),(0,-1)]
@@ -118,9 +118,7 @@ def sobel(m, i, j):
  
     gradj = (m[i-1, j+1]+2*m[i, j+1]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i, j-1]+m[i+1, j-1])
             
-    gradi = (m[i+1, j-1]+2*m[i+1, j]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i-1, j]+m[i-1, j+1])
-    gradj = m[i, j+1] - m[i, j-1]
-    gradi = m[i+1, j] - m[i-1, j]        
+    gradi = (m[i+1, j-1]+2*m[i+1, j]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i-1, j]+m[i-1, j+1])      
     return gradi, gradj
 #tant qu'on a encore des pixels pas remplis
 while len(forme_set) > 0:
@@ -177,7 +175,7 @@ while len(forme_set) > 0:
                 if 0 <= a < height and 0 <= b < width:
                     aire += 1
                     somme += confiance[a, b]
-        cval.append(somme / aire)
+        cval.append(somme / (taille_patch**2))
 
     meilleure_priorite = -1
     p_chapeau = None
@@ -246,9 +244,8 @@ poid = np.zeros_like(img)
 s=6
 img_trou_ech = [forme[i] for i in range(len(forme)) if (forme[i][0] % s == 0 and forme[i][1] % s == 0)]
 print("gogo")
-nb_i=2
+nb_i=5
 mediane = True
-temperature=1000
 for k in range(nb_i):
     skio.imsave(f"resultat_{k}.png", np.clip(img, 0, 255).astype(np.uint8))
     votes_mediane = {}
@@ -270,36 +267,36 @@ for k in range(nb_i):
         
         meilleur_ssd = float('inf')
         q = None
-        temperature=0
+        temperature_l=[]
         for (si, sj) in sources:
             ssd = ssd_map[si, sj]
             if ssd < meilleur_ssd:
                 meilleur_ssd = ssd
                 qi,qj = (si, sj) 
-                temperature+=meilleur_ssd
-            temperature/=len(sources)
-            if mediane == False :
-                di_haut, di_bas = i - i_min, i_max - i
-                dj_gauche, dj_droite = j - j_min, j_max - j
-                
-                patch_source = img[qi - di_haut : qi + di_bas, qj - dj_gauche : qj + dj_droite]
-                poid = np.exp(-meilleur_ssd/temperature)
-                vote[i_min:i_max, j_min:j_max] += patch_source*poid
-                poid[i_min:i_max, j_min:j_max] += poid
-    
-            else:  
-                di_haut, di_bas = i - i_min, i_max - i
-                dj_gauche, dj_droite = j - j_min, j_max - j
-                
-                patch_source = img[qi - di_haut : qi + di_bas, qj - dj_gauche : qj + dj_droite]
-                
-                for d_i in range(patch_source.shape[0]):
-                    for d_j in range(patch_source.shape[1]):
-                        pi, pj = i_min + d_i, j_min + d_j
-                        if (pi, pj) not in votes_mediane:
-                            votes_mediane[(pi, pj)] = []
-                        votes_mediane[(pi, pj)].append(patch_source[d_i, d_j])
-    
+                temperature_l.append(meilleur_ssd)
+            temperature = np.mean(np.array( temperature_l)) - 3*np.std(np.array(temperature_l))
+        if mediane == False :
+            di_haut, di_bas = i - i_min, i_max - i
+            dj_gauche, dj_droite = j - j_min, j_max - j
+            
+            patch_source = img[qi - di_haut : qi + di_bas, qj - dj_gauche : qj + dj_droite]
+            poid = np.exp(-meilleur_ssd/temperature)
+            vote[i_min:i_max, j_min:j_max] += patch_source*poid
+            poid[i_min:i_max, j_min:j_max] += poid
+
+        else:  
+            di_haut, di_bas = i - i_min, i_max - i
+            dj_gauche, dj_droite = j - j_min, j_max - j
+            
+            patch_source = img[qi - di_haut : qi + di_bas, qj - dj_gauche : qj + dj_droite]
+            
+            for d_i in range(patch_source.shape[0]):
+                for d_j in range(patch_source.shape[1]):
+                    pi, pj = i_min + d_i, j_min + d_j
+                    if (pi, pj) not in votes_mediane:
+                        votes_mediane[(pi, pj)] = []
+                    votes_mediane[(pi, pj)].append(patch_source[d_i, d_j])
+
     if mediane == False:
         mask_poids = poid > 0
         img[mask_poids] = vote[mask_poids] / poid[mask_poids]
