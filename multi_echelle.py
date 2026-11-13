@@ -1,0 +1,398 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage import io as skio
+from skimage.color import rgb2lab, lab2rgb   
+from skimage.transform import resize        
+import math
+from scipy.signal import correlate
+from scipy import ndimage   
+
+def vers_rgb_uint8(img_lab):
+    rgb = lab2rgb(img_lab)
+    return (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8)
+
+def get_mask_interactively(image_path, brush_size=15):
+    img_raw = skio.imread(image_path)
+
+    img_display = img_raw.astype(np.float32)
+    if img_display.max() > 0:
+        img_display = (img_display - img_display.min()) / (img_display.max() - img_display.min())
+
+    # Gestion des niveaux de luminance et canal alpha pour l'affichage
+    if img_display.ndim == 2:
+        img_display = np.stack((img_display,)*3, axis=-1)
+    else:
+        img_display = img_display[:, :, :3]
+
+    H, W = img_display.shape[:2]
+    omega = np.zeros((H, W), dtype=bool)
+    yy, xx = np.ogrid[:H, :W]
+    state = {"drawing": False, "erase": False}
+
+    fig, ax = plt.subplots()
+    ax.imshow(img_display, interpolation="none")
+    overlay = ax.imshow(np.where(omega, 1.0, np.nan), alpha=0.5, cmap="Reds", vmin=0, vmax=1)
+    ax.set_title("Clic GAUCHE: Dessiner | Clic DROIT: Effacer\nFermez la fenêtre pour valider")  # [CORRIGÉ] typo "GAUC HE"
+
+    def paint(event):
+        if event.inaxes != ax or not state["drawing"]:
+            return
+        x, y = int(event.xdata), int(event.ydata)
+        disk = (xx - x) ** 2 + (yy - y) ** 2 <= brush_size ** 2
+        omega[disk] = not state["erase"]
+        overlay.set_data(np.where(omega, 1.0, np.nan))
+        fig.canvas.draw_idle()
+
+    def on_press(event):
+        state["drawing"] = True
+        state["erase"] = (event.button == 3)
+        paint(event)
+
+    def on_release(event):
+        state["drawing"] = False
+
+    fig.canvas.mpl_connect("button_press_event", on_press)
+    fig.canvas.mpl_connect("button_release_event", on_release)
+    fig.canvas.mpl_connect("motion_notify_event", paint)
+
+    plt.show()
+
+    coords = np.argwhere(omega)
+    return [(int(c[0]), int(c[1])) for c in coords]
+
+
+
+chemin="../bast-pau.png"
+
+forme = get_mask_interactively(chemin, brush_size=30)
+
+
+img = skio.imread(chemin).astype(float)
+if img.ndim == 2:
+    img = img[:, :, None]
+img = img[:, :, :3]
+
+if img.shape[2] == 1:
+    img = np.repeat(img, 3, axis=2)
+
+shape = img.shape
+height, width, nb_canaux = shape
+
+forme_origine = set(forme)
+forme_set = set(forme)
+
+taille_patch = 13
+h = (taille_patch - 1) // 2
+
+alpha = 4 * 100
+
+largeur_bande = 60
+lambda_dist = 0.02
+
+poids_guide = 0.3                 
+taille_min = 6 * taille_patch     
+
+img_trou = img.copy()
+for (i,j) in forme:
+    img_trou[i, j, :] = 0
+skio.imsave("capture.png", img_trou.astype(np.uint8))
+
+img = rgb2lab(img / 255.0)
+
+trou = np.zeros((height, width), dtype=bool)
+for (i,j) in forme:
+    trou[i, j] = True
+
+
+
+def preparer_sources(trou, largeur_bande):
+    height, width = trou.shape
+    valides = ndimage.binary_erosion(~trou, structure=np.ones((taille_patch, taille_patch)), border_value=0)
+
+    masque_sources = valides
+    if largeur_bande is not None:
+        dist_au_trou = ndimage.distance_transform_edt(~trou)
+        dans_la_bande = dist_au_trou <= largeur_bande
+        if (valides & dans_la_bande).sum() >= 200:
+            masque_sources = valides & dans_la_bande
+
+    if masque_sources.sum() == 0:
+        raise ValueError("Aucun patch source valide : le trou est trop grand pour taille_patch=%d" % taille_patch)
+
+    a, b = np.nonzero(masque_sources)
+    r0, r1 = max(0, a.min() - h), min(height, a.max() + h + 1)
+    c0, c1 = max(0, b.min() - h), min(width, b.max() + h + 1)
+
+    diag = math.hypot(height, width)         #normalisaion pr que la penalie lambda rese oujours la meme
+
+    valides = np.argwhere(masque_sources)            
+    valides_i, valides_j = valides[:, 0], valides[:, 1]
+    return valides_i, valides_j, r0, r1, c0, c1, diag
+
+
+def meilleure_source(ssd_map_c, nb_pixels_connus, i_p, j_p, src):
+    valides_i, valides_j, r0, r1, c0, c1, diag = src
+    nb_canaux = 3
+    ssd = ssd_map_c[valides_i - r0, valides_j - c0 ]
+    mse = ssd / (nb_pixels_connus * nb_canaux)
+    dist = np.sqrt((valides_i - i_p) ** 2 + (valides_j - j_p) ** 2) / diag
+    cout = np.round(mse + lambda_dist * 100 ** 2 * dist, 2)
+    k = np.argmin(cout)
+    return (int(valides_i[k]), int(valides_j[k])), max(float(mse[k]), 0.0)
+
+
+
+def chercher_source(img, poids, cible, i_p, j_p, src):
+    r0, r1, c0, c1 = src[2:6]
+    nb_canaux = img.shape[2]
+
+    patch_a_changer = cible * poids[:, :, None]
+    term3 = np.sum(patch_a_changer * cible)        # = somme des poids * valeur²
+
+    img_zone = img[r0:r1, c0:c1]
+    ssd_map = np.zeros((r1 - r0, c1 - c0))
+    for c in range(nb_canaux):
+        im_canal_c = img_zone[:, :, c]
+        term1 = correlate(im_canal_c**2, poids, mode='same', method='fft')
+        term2 = -2 * correlate(im_canal_c, patch_a_changer[:, :, c], mode='same', method='fft')
+        ssd_map += term1 + term2
+    ssd_map += term3
+
+    return meilleure_source(ssd_map, poids.sum(), i_p, j_p, src)
+
+
+def sobel(m, i, j):
+    if not (1 <= i < m.shape[0] - 1 and 1 <= j < m.shape[1] - 1):
+        return 0.0, 0.0
+
+    gradj = (m[i-1, j+1]+2*m[i, j+1]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i, j-1]+m[i+1, j-1])
+
+    gradi = (m[i+1, j-1]+2*m[i+1, j]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i-1, j]+m[i-1, j+1])
+    return gradi, gradj
+
+
+def remplir(img, trou, guide=None, largeur_bande=None):
+    img = img.copy()
+    height, width, nb_canaux = img.shape
+
+    forme = [(int(i), int(j)) for (i, j) in np.argwhere(trou)]
+    forme_set = set(forme)
+
+    luminance = img[:, :, 0].copy()
+
+    #on remplit la mask de confiance
+    confiance = np.ones((height, width))
+    for (i,j) in forme:
+        confiance[i, j] = 0
+
+    connu = np.ones((height, width))
+    for (i,j) in forme:
+        connu[i, j] = 0
+
+    reste = trou.copy()
+
+    src = preparer_sources(trou, largeur_bande)
+    r0, r1, c0, c1 = src[2:6]
+
+    #tant qu'on a encore des pixels pas remplis
+    while len(forme_set) > 0:
+
+        croix = ndimage.generate_binary_structure(2, 1)
+        masque_front = reste & ~ndimage.binary_erosion(reste, structure=croix, border_value=1)
+        frontiere = [(int(i), int(j)) for (i, j) in np.argwhere(masque_front)]
+
+        #calcul de I
+        grads = []
+        for (i,j) in frontiere:
+            norme_max = -1
+            gradi_max = 0
+            gradj_max = 0
+            for i1 in range(-h, h + 1):
+                for j1 in range(-h, h + 1):
+                    a, b = i + i1, j + j1
+                    if 1 <= a < height - 1 and 1 <= b < width - 1 \
+                       and all((a+x, b+y) not in forme_set for x in (-1, 0, 1) for y in (-1, 0, 1)):
+                        gradi, gradj = sobel(luminance, a, b)   
+                        norme = math.sqrt(gradi**2 + gradj**2)
+                        if norme > norme_max:
+                            norme_max = norme
+                            gradi_max = gradi
+                            gradj_max = gradj
+            #on le tourne de 90 degré ce qui revient a faire
+            grad_tangent = (-gradj_max, gradi_max)
+            grads.append(grad_tangent)
+
+        #calcul de n
+        n_vals = []
+        for (i, j) in frontiere:
+            gradi_n, gradj_n = sobel(connu, i, j)    
+            norme = math.sqrt(gradi_n**2 + gradj_n**2)
+            if norme == 0:
+                n_vals.append((0.0, 0.0))
+            else:
+                n_vals.append((gradi_n / norme, gradj_n / norme))
+
+
+        carte_conf = ndimage.uniform_filter(confiance, size=taille_patch, mode='constant', cval=0.0)
+        cval = [carte_conf[i, j] for (i, j) in frontiere]
+
+
+        meilleure_priorite = -1
+        p_chapeau = None
+        C_chapeau = 0
+        for i in range(len(frontiere)):
+            produit_scalair = abs(np.dot(grads[i], n_vals[i])/alpha)
+            prio = cval[i] * (produit_scalair + 0.001)
+            if prio > meilleure_priorite:
+                meilleure_priorite = prio
+                p_chapeau = frontiere[i]
+                C_chapeau = cval[i]
+        i_prio, j_prio = p_chapeau
+
+        i_min, i_max = max(0, i_prio - h), min(height, i_prio + h + 1)
+        j_min, j_max = max(0, j_prio - h), min(width, j_prio + h + 1)
+
+        pi_min, pi_max = h - (i_prio - i_min), h + (i_max - i_prio)
+        pj_min, pj_max = h - (j_prio - j_min), h + (j_max - j_prio)
+
+
+
+        zone_inconnue = np.zeros((taille_patch, taille_patch))
+        zone_inconnue[pi_min:pi_max, pj_min:pj_max] = connu[i_min:i_max, j_min:j_max]
+
+        valeurs = img[i_min:i_max, j_min:j_max].copy()
+        if guide is not None:
+            inconnus = (connu[i_min:i_max, j_min:j_max] == 0)
+            valeurs[inconnus] = guide[i_min:i_max, j_min:j_max][inconnus]
+            zone_inconnue[pi_min:pi_max, pj_min:pj_max] += poids_guide * inconnus
+
+        cible = np.zeros((taille_patch, taille_patch, nb_canaux))
+        cible[pi_min:pi_max, pj_min:pj_max] = valeurs
+
+        q, _ = chercher_source(img, zone_inconnue, cible, i_prio, j_prio, src)  
+
+        for i in range(-h, h + 1):
+            for j in range(-h, h + 1):
+                a, b = i_prio + i, j_prio + j
+                if 0 <= a < height and 0 <= b < width and (a,b) in forme_set:
+                    for c in range(nb_canaux):
+                        img[a, b, c] = img[q[0] + i, q[1] + j, c]
+
+                    luminance[a, b] = img[a, b, 0]
+                    confiance[a, b] = C_chapeau
+                    connu[a, b] = 1
+                    reste[a, b] = False
+                    forme_set.remove((a,b))
+
+        print("pixels pas encore remplis", len(forme_set))
+    return img
+
+
+
+def reduire(img, trou):
+    connu = (~trou).astype(float)
+    flou_connu = ndimage.gaussian_filter(connu, sigma=1.0)
+    img_red = np.zeros_like(img)
+    for c in range(img.shape[2]):
+        img_red[:, :, c] = ndimage.gaussian_filter(img[:, :, c] * connu, sigma=1.0) / np.maximum(flou_connu, 1e-8)
+    img_red = img_red[::2, ::2]
+
+    H2, W2 = img_red.shape[:2]
+    trou_pad = np.zeros((2 * H2, 2 * W2), dtype=bool)
+    trou_pad[:trou.shape[0], :trou.shape[1]] = trou
+    trou_red = trou_pad.reshape(H2, 2, W2, 2).any(axis=(1, 3))
+    return img_red, trou_red
+
+
+images = [img]
+trous = [trou]
+while True:
+    img_c, trou_c = reduire(images[-1], trous[-1])
+    valides_c = ndimage.binary_erosion(~trou_c, structure=np.ones((taille_patch, taille_patch)), border_value=0)
+    if min(img_c.shape[:2]) < taille_min or valides_c.sum() < 200:
+        break
+    images.append(img_c)
+    trous.append(trou_c)
+print("pyramide :", [im.shape[:2] for im in images])
+
+guide = None
+for n in range(len(images) - 1, -1, -1):
+    print("niveau", n, images[n].shape[:2])
+    bande_n = None if largeur_bande is None else largeur_bande / 2 ** n
+    resultat_n = remplir(images[n], trous[n], guide, bande_n)
+    skio.imsave(f"niveau_{n}.png", vers_rgb_uint8(resultat_n))
+    if n > 0:
+        H, W = trous[n - 1].shape
+        guide = resize(resultat_n, (H, W, nb_canaux), order=1, preserve_range=True, anti_aliasing=False)
+img = resultat_n
+
+# sources du niveau final, pour la méthode itérative
+src = preparer_sources(trou, largeur_bande)
+r0, r1, c0, c1 = src[2:6]
+
+#méthode itérative
+vote = np.zeros_like(img)
+poid = np.zeros_like(img)
+s=6
+img_trou_ech = [forme[i] for i in range(len(forme)) if (forme[i][0] % s == 0 and forme[i][1] % s == 0)]
+print("gogo")
+nb_i=5
+mediane = False
+for k in range(nb_i):
+
+    skio.imsave(f"resultat_{k}.png", vers_rgb_uint8(img))
+    votes_mediane = {}
+    vote = np.zeros_like(img)
+    poid = np.zeros((height, width))
+    liste_votes = []
+    img_zone = img[r0:r1, c0:c1]
+    for (i, j) in img_trou_ech:
+        i_min, i_max = max(0, i - h), min(height, i + h + 1)
+        j_min, j_max = max(0, j - h), min(width, j + h + 1)
+
+
+        pi_min, pi_max = h - (i - i_min), h + (i_max - i)
+        pj_min, pj_max = h - (j - j_min), h + (j_max - j)
+        mask = np.zeros((taille_patch, taille_patch))
+        mask[pi_min:pi_max, pj_min:pj_max] = 1.0
+        patch = np.zeros((taille_patch, taille_patch, nb_canaux))
+        patch[pi_min:pi_max, pj_min:pj_max] = img[i_min:i_max, j_min:j_max]
+
+        (qi, qj), d_mse = chercher_source(img, mask, patch, i, j, src)   # [RECHERCHE]
+
+
+        di_haut, di_bas = i - i_min, i_max - i
+        dj_gauche, dj_droite = j - j_min, j_max - j
+
+        patch_source = img[qi - di_haut : qi + di_bas, qj - dj_gauche : qj + dj_droite]
+
+        if mediane == False :
+            liste_votes.append((i_min, i_max, j_min, j_max, patch_source.copy(), d_mse))
+
+        else:
+            for d_i in range(patch_source.shape[0]):
+                for d_j in range(patch_source.shape[1]):
+                    pi, pj = i_min + d_i, j_min + d_j
+                    if (pi, pj) not in votes_mediane:
+                        votes_mediane[(pi, pj)] = []
+                    votes_mediane[(pi, pj)].append(patch_source[d_i, d_j])
+
+    if mediane == False:
+
+        if len(liste_votes) > 0:
+            d_tous = np.array([v[5] for v in liste_votes])
+            sigma2 = np.percentile(d_tous, 75) + 1e-8
+            for (i_min, i_max, j_min, j_max, patch_source, d_v) in liste_votes:
+                w = np.exp(-d_v / (2 * sigma2))
+                vote[i_min:i_max, j_min:j_max] += patch_source * w
+                poid[i_min:i_max, j_min:j_max] += w
+            zone_maj = (poid > 0) & trou
+            img[zone_maj] = vote[zone_maj] / poid[zone_maj][:, None]
+    else:
+        for (pi, pj), liste_valeurs in votes_mediane.items():
+            if trou[pi, pj]:
+                img[pi, pj] = np.median(liste_valeurs, axis=0)
+    print("ca roule")
+
+skio.imsave("resultat.png", vers_rgb_uint8(img))
+print("résultat enregistré dans resultat.png")
