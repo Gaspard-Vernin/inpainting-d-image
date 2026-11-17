@@ -67,10 +67,10 @@ def get_mask_interactively(image_path, brush_size=15):
 
 
 #image a traiter
-chemin="../bast-pau.png"
+chemin="../sau.png"
 
 #on dessine la zone a remplir
-forme = get_mask_interactively(chemin, brush_size=30)
+forme = get_mask_interactively(chemin, brush_size=10)
 
 
 #on charge l'image en 3 canaux (on enleve l'alpha, on triple si elle est en gris)
@@ -90,7 +90,7 @@ forme_origine = set(forme)
 forme_set = set(forme)
 
 #parametres
-taille_patch = 13   #taille des patchs, impaire pour avoir un centre vraiment au centre
+taille_patch = 17   #taille des patchs, impaire pour avoir un centre vraiment au centre
 h = (taille_patch - 1) // 2   #demi taille du patch
 
 alpha = 400   #normalisation du terme de données (L entre 0 et 100, sobel de poids 4 donc divise par 400 pour etre inférieur à 1)
@@ -131,14 +131,14 @@ def preparer_sources(trou, largeur_bande):
 
     #plus aucune source : le trou est trop grand
     if masque_sources.sum() == 0:
-        raise ValueError("Aucun patch source valide : le trou est trop grand pour taille_patch=%d" % taille_patch)
+        raise ValueError("aucun patch source")
 
     #rectangle qui contient toutes les sources, on calculera la ssd que dedans
     a, b = np.nonzero(masque_sources)
     r0, r1 = max(0, a.min() - h), min(height, a.max() + h + 1)
     c0, c1 = max(0, b.min() - h), min(width, b.max() + h + 1)
 
-    diag = math.hypot(height, width)         #normalisaion pr que la penalie lambda rese oujours la meme
+    diag = math.hypot(height, width)#normalisaion pr que la penalie lambda rese oujours la meme
 
     #coordonnées des centres valides
     valides = np.argwhere(masque_sources)            
@@ -164,7 +164,7 @@ def chercher_source(img, poids, cible, i_p, j_p, src):
     r0, r1, c0, c1 = src[2:6]
     nb_canaux = img.shape[2]
 
-    #ssd = somme poids*I² - 2*somme poids*cible*I + somme poids*cible²
+    #ssd = somme poids*I2 - 2*somme poids*cible*I + somme poids*cible²
     patch_a_changer = cible * poids[:, :, None]
     term3 = np.sum(patch_a_changer * cible)        # = somme des poids * valeur²
 
@@ -178,17 +178,6 @@ def chercher_source(img, poids, cible, i_p, j_p, src):
     ssd_map += term3   #le terme constant
 
     return meilleure_source(ssd_map, poids.sum(), i_p, j_p, src)
-
-
-#gradient de sobel en un pixel (0 sur le bord de l'image)
-def sobel(m, i, j):
-    if not (1 <= i < m.shape[0] - 1 and 1 <= j < m.shape[1] - 1):
-        return 0.0, 0.0
-
-    gradj = (m[i-1, j+1]+2*m[i, j+1]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i, j-1]+m[i+1, j-1])
-
-    gradi = (m[i+1, j-1]+2*m[i+1, j]+m[i+1, j+1]) - (m[i-1, j-1]+2*m[i-1, j]+m[i-1, j+1])
-    return gradi, gradj
 
 
 #remplit le trou guide = niveau d'avant agrandi (multi échelle), none sinon
@@ -225,57 +214,51 @@ def remplir(img, trou, guide=None, largeur_bande=None):
         masque_front = reste & ~ndimage.binary_erosion(reste, structure=croix, border_value=1)
         frontiere = [(int(i), int(j)) for (i, j) in np.argwhere(masque_front)]
 
+        fi, fj = np.nonzero(masque_front)    #le front en tableaux, dans le meme ordre que frontiere
+
         #calcul de I
-        grads = []
-        #pour chaque pixel du front on garde le gradient le plus fort de son patch
-        for (i,j) in frontiere:
-            norme_max = -1
-            gradi_max = 0
-            gradj_max = 0
-            for i1 in range(-h, h + 1):
-                for j1 in range(-h, h + 1):
-                    a, b = i + i1, j + j1
-                    #on prend un gradient que si ses 9 voisins sont connus, sinon on lirait l'objet a enlever
-                    if 1 <= a < height - 1 and 1 <= b < width - 1 \
-                       and all((a+x, b+y) not in forme_set for x in (-1, 0, 1) for y in (-1, 0, 1)):
-                        gradi, gradj = sobel(luminance, a, b)   
-                        norme = math.sqrt(gradi**2 + gradj**2)
-                        if norme > norme_max:
-                            norme_max = norme
-                            gradi_max = gradi
-                            gradj_max = gradj
-            #on le tourne de 90 degré ce qui revient a faire
-            grad_tangent = (-gradj_max, gradi_max)
-            grads.append(grad_tangent)
+        #sobel de toute l'image d'un coup
+        gi = ndimage.sobel(luminance, axis=0)
+        gj = ndimage.sobel(luminance, axis=1)
+        #on prend un gradient que si ses 9 voisins sont connus, sinon on lirait l'objet a enlever (érosion par un carré 3x3)
+        grad_ok = ndimage.binary_erosion(connu.astype(bool), structure=np.ones((3, 3)), border_value=0)
+        norme_img = np.where(grad_ok, np.sqrt(gi**2 + gj**2), -1.0)      #-1 si on peut pas l'utiliser
+        #pour chaque pixel du front on regarde les normes de tout son patch (-2 en dehors de l'image)
+        offs = np.arange(-h, h + 1)
+        pad = np.pad(norme_img, h, constant_values=-2.0)
+        fenetres = pad[(fi + h)[:, None, None] + offs[None, :, None], (fj + h)[:, None, None] + offs[None, None, :]]
+        #on garde le gradient le plus fort du patch
+        k_max = fenetres.reshape(len(fi), -1).argmax(axis=1)
+        a_max = fi + offs[k_max // taille_patch]
+        b_max = fj + offs[k_max % taille_patch]
+        valide = norme_img[a_max, b_max] >= 0   #si aucun pixel utilisable le gradient reste a (0, 0)
+        gradi_max = np.where(valide, gi[a_max, b_max], 0.0)
+        gradj_max = np.where(valide, gj[a_max, b_max], 0.0)
+        #on le tourne de 90 degré ce qui revient a faire
+        tang_i, tang_j = -gradj_max, gradi_max
 
         #calcul de n
-        n_vals = []
         #normale au front = gradient du masque des pixels connus, normalisé
-        for (i, j) in frontiere:
-            gradi_n, gradj_n = sobel(connu, i, j)    
-            norme = math.sqrt(gradi_n**2 + gradj_n**2)
-            if norme == 0:
-                n_vals.append((0.0, 0.0))
-            else:
-                n_vals.append((gradi_n / norme, gradj_n / norme))
-
+        ni = ndimage.sobel(connu, axis=0)[fi, fj]
+        nj = ndimage.sobel(connu, axis=1)[fi, fj]
+        bord = (fi < 1) | (fi >= height - 1) | (fj < 1) | (fj >= width - 1)   #au bord de l'image la normale reste a (0, 0)
+        ni = np.where(bord, 0.0, ni)
+        nj = np.where(bord, 0.0, nj)
+        norme_n = np.sqrt(ni**2 + nj**2)
+        non_nul = norme_n > 0
+        ni = np.where(non_nul, ni / np.where(non_nul, norme_n, 1.0), 0.0)
+        nj = np.where(non_nul, nj / np.where(non_nul, norme_n, 1.0), 0.0)
 
         #confiance moyenne sur le patch de chaque pixel du front
         carte_conf = ndimage.uniform_filter(confiance, size=taille_patch, mode='constant', cval=0.0)
-        cval = [carte_conf[i, j] for (i, j) in frontiere]
-
+        cval = carte_conf[fi, fj]
 
         #priorité = confiance * terme de données, on garde le pixel du front qui a la plus grande
-        meilleure_priorite = -1
-        p_chapeau = None
-        C_chapeau = 0
-        for i in range(len(frontiere)):
-            produit_scalair = abs(np.dot(grads[i], n_vals[i])/alpha)
-            prio = cval[i] * (produit_scalair + 0.001)   #+0.001 pour pas que tout soit nul dans les zones plates
-            if prio > meilleure_priorite:
-                meilleure_priorite = prio
-                p_chapeau = frontiere[i]
-                C_chapeau = cval[i]
+        produit_scalair = np.abs((tang_i * ni + tang_j * nj) / alpha)
+        prio = cval * (produit_scalair + 0.001)   #+0.001 pour pas que tout soit nul dans les zones plates
+        k_prio = np.argmax(prio)
+        p_chapeau = frontiere[k_prio]
+        C_chapeau = cval[k_prio]
         i_prio, j_prio = p_chapeau
 
         #le patch autour du pixel choisi, coupé au bord de l'image
@@ -358,9 +341,12 @@ print("pyramide :", [im.shape[:2] for im in images])
 
 #on remplit du plus petit niveau au plus grand, chaque niveau est guidé par le précédent agrandi
 guide = None
+h_niveau0 = h
 for n in range(len(images) - 1, -1, -1):
     print("niveau", n, images[n].shape[:2])
-    bande_n = None if largeur_bande is None else largeur_bande / 2 ** n   #la bande rétrécit avec l'image
+    bande_n = largeur_bande / (n+1) #on redui la aille de la bande.
+    h = max(3, h_niveau0 //(2**n))    
+    taille_patch = 2 * h + 1
     resultat_n = remplir(images[n], trous[n], guide, bande_n)
     skio.imsave(f"niveau_{n}.png", vers_rgb_uint8(resultat_n))   #on enregistre chaque niveau pour voir
     if n > 0:
@@ -427,7 +413,7 @@ for k in range(nb_i):
 
         if len(liste_votes) > 0:
             d_tous = np.array([v[5] for v in liste_votes])
-            sigma2 = np.percentile(d_tous, 75) + 1e-8   #sigma² = 75e percentile des erreurs
+            sigma2 = np.percentile(d_tous, 25) + 1e-8   
             for (i_min, i_max, j_min, j_max, patch_source, d_v) in liste_votes:
                 w = np.exp(-d_v / (2 * sigma2))
                 vote[i_min:i_max, j_min:j_max] += patch_source * w

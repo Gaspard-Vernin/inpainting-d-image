@@ -67,7 +67,7 @@ def get_mask_interactively(image_path, brush_size=15):
 
 
 #image a traiter
-chemin="../image.png"
+chemin="../salon.png"
 
 #on dessine la zone a remplir
 forme = get_mask_interactively(chemin, brush_size=40)
@@ -357,9 +357,12 @@ print("pyramide :", [im.shape[:2] for im in images])
 
 #on remplit du plus petit niveau au plus grand, chaque niveau est guidé par le précédent agrandi
 guide = None
+h_niveau0 = h
 for n in range(len(images) - 1, -1, -1):
     print("niveau", n, images[n].shape[:2])
-    bande_n = None if largeur_bande is None else largeur_bande / 2 ** n   #la bande rétrécit avec l'image
+    bande_n = largeur_bande / (n+1) #on redui la aille de la bande.
+    h = max(3, h_niveau0 //(2**n))    
+    taille_patch = 2 * h + 1 
     resultat_n = remplir(images[n], trous[n], guide, bande_n)
     skio.imsave(f"niveau_{n}.png", vers_rgb_uint8(resultat_n))   #on enregistre chaque niveau pour voir
     if n > 0:
@@ -421,7 +424,7 @@ for k in range(nb_i):
     if mediane == False:
         if len(liste_votes) > 0:
             d_tous = np.array([v[5] for v in liste_votes])
-            sigma2 = np.percentile(d_tous, 75) + 1e-8   #sigma² = 75e percentile des erreurs
+            sigma2 = np.percentile(d_tous, 25) + 1e-8    
             for (i_min, i_max, j_min, j_max, patch_source, d_v) in liste_votes:
                 w = np.exp(-d_v / (2 * sigma2))
                 vote[i_min:i_max, j_min:j_max] += patch_source * w
